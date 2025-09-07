@@ -1,83 +1,61 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, send_file, jsonify
 import pickle
 import os
 import numpy as np
 
 app = Flask(__name__)
 
-# ----------------------------
-# Storage for client weights
-# ----------------------------
-UPLOAD_FOLDER = "uploaded_weights"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# Folder to save aggregated weights
+WEIGHTS_FOLDER = "uploaded_weights"
+os.makedirs(WEIGHTS_FOLDER, exist_ok=True)
+GLOBAL_WEIGHTS_FILE = os.path.join(WEIGHTS_FOLDER, "global_weights.pkl")
 
-client_weights = {}  # {client_id: weights}
-
-# ----------------------------
-# Home Route
-# ----------------------------
-@app.route("/", methods=["GET"])
-def home():
-    return "Federated server up ✅"
+# Temporary storage for client weights
+client_weights_list = []
 
 # ----------------------------
-# Upload Weights
+# Endpoint: Upload client weights
 # ----------------------------
 @app.route("/upload_weights", methods=["POST"])
 def upload_weights():
-    try:
-        client_id = request.form.get("client_id")
-        if not client_id:
-            return jsonify({"error": "client_id missing"}), 400
+    global client_weights_list
 
-        file = request.files["file"]
-        weights = pickle.load(file)
+    if "weights" not in request.files:
+        return "No weights file uploaded", 400
 
-        # Store in dictionary
-        client_weights[client_id] = weights
+    weights_file = request.files["weights"]
+    client_weights = pickle.load(weights_file)
+    client_weights_list.append(client_weights)
 
-        # Save a copy on disk
-        save_path = os.path.join(UPLOAD_FOLDER, f"{client_id}_weights.pkl")
-        with open(save_path, "wb") as f:
-            pickle.dump(weights, f)
+    # Check if all clients have sent weights (example: 3 clients)
+    if len(client_weights_list) == 3:
+        # Aggregate weights (simple average)
+        aggregated_weights = []
+        for layers in zip(*client_weights_list):
+            aggregated_weights.append(np.mean(layers, axis=0))
 
-        return jsonify({
-            "message": f"✅ Weights received from {client_id}",
-            "total_clients": len(client_weights)
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        # Save aggregated global weights
+        with open(GLOBAL_WEIGHTS_FILE, "wb") as f:
+            pickle.dump(aggregated_weights, f)
 
-# ----------------------------
-# Aggregate Weights
-# ----------------------------
-@app.route("/aggregate", methods=["GET"])
-def aggregate():
-    if not client_weights:
-        return jsonify({"error": "No weights received yet"})
+        # Clear temporary list for next round
+        client_weights_list = []
 
-    try:
-        # Convert dictionary values (weights list) into list
-        all_weights = list(client_weights.values())
+        return jsonify({"message": "✅ Aggregation complete", "global_file": GLOBAL_WEIGHTS_FILE})
 
-        # Perform simple FedAvg
-        agg = [np.mean([w[i] for w in all_weights], axis=0) for i in range(len(all_weights[0]))]
-
-        # Save aggregated weights
-        global_path = os.path.join(UPLOAD_FOLDER, "global_weights.pkl")
-        with open(global_path, "wb") as f:
-            pickle.dump(agg, f)
-
-        return jsonify({
-            "message": "✅ Aggregation complete",
-            "num_clients": len(client_weights),
-            "global_file": global_path
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"message": "✅ Weights received, waiting for other clients..."})
 
 # ----------------------------
-# Main
+# Endpoint: Download global weights
+# ----------------------------
+@app.route("/download_global", methods=["GET"])
+def download_global():
+    if not os.path.exists(GLOBAL_WEIGHTS_FILE):
+        return "Global weights not available yet.", 404
+    return send_file(GLOBAL_WEIGHTS_FILE, as_attachment=True)
+
+# ----------------------------
+# Run server
 # ----------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(debug=True)

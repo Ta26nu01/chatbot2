@@ -1,75 +1,83 @@
 from flask import Flask, request, jsonify
 import pickle
-import numpy as np
 import os
+import numpy as np
 
 app = Flask(__name__)
 
-# Directory to store uploaded weights
-UPLOAD_DIR = "uploaded_weights"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# ----------------------------
+# Storage for client weights
+# ----------------------------
+UPLOAD_FOLDER = "uploaded_weights"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+client_weights = {}  # {client_id: weights}
 
+# ----------------------------
+# Home Route
+# ----------------------------
 @app.route("/", methods=["GET"])
 def home():
     return "Federated server up ✅"
 
-
+# ----------------------------
+# Upload Weights
+# ----------------------------
 @app.route("/upload_weights", methods=["POST"])
 def upload_weights():
-    """
-    Receive weights from clients and save them as files.
-    Each client sends a pickle file.
-    """
     try:
-        client_id = request.form.get("client_id", "unknown")
+        client_id = request.form.get("client_id")
+        if not client_id:
+            return jsonify({"error": "client_id missing"}), 400
+
         file = request.files["file"]
+        weights = pickle.load(file)
 
-        save_path = os.path.join(UPLOAD_DIR, f"client_{client_id}_weights.pkl")
+        # Store in dictionary
+        client_weights[client_id] = weights
 
-        # Save the uploaded file
+        # Save a copy on disk
+        save_path = os.path.join(UPLOAD_FOLDER, f"{client_id}_weights.pkl")
         with open(save_path, "wb") as f:
-            f.write(file.read())
+            pickle.dump(weights, f)
 
         return jsonify({
-            "message": f"✅ Weights received from Client {client_id}",
-            "saved_file": save_path
+            "message": f"✅ Weights received from {client_id}",
+            "total_clients": len(client_weights)
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-
+# ----------------------------
+# Aggregate Weights
+# ----------------------------
 @app.route("/aggregate", methods=["GET"])
 def aggregate():
-    """
-    Load all saved client weights and perform federated averaging.
-    """
-    weight_files = [f for f in os.listdir(UPLOAD_DIR) if f.endswith(".pkl")]
+    if not client_weights:
+        return jsonify({"error": "No weights received yet"})
 
-    if not weight_files:
-        return jsonify({"error": "No weights received yet"}), 400
+    try:
+        # Convert dictionary values (weights list) into list
+        all_weights = list(client_weights.values())
 
-    all_weights = []
+        # Perform simple FedAvg
+        agg = [np.mean([w[i] for w in all_weights], axis=0) for i in range(len(all_weights[0]))]
 
-    for wf in weight_files:
-        with open(os.path.join(UPLOAD_DIR, wf), "rb") as f:
-            weights = pickle.load(f)
-            all_weights.append(weights)
+        # Save aggregated weights
+        global_path = os.path.join(UPLOAD_FOLDER, "global_weights.pkl")
+        with open(global_path, "wb") as f:
+            pickle.dump(agg, f)
 
-    # Perform simple federated averaging
-    averaged = [np.mean([w[i] for w in all_weights], axis=0) for i in range(len(all_weights[0]))]
+        return jsonify({
+            "message": "✅ Aggregation complete",
+            "num_clients": len(client_weights),
+            "global_file": global_path
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    # Save aggregated global weights
-    global_path = os.path.join(UPLOAD_DIR, "global_weights.pkl")
-    with open(global_path, "wb") as f:
-        pickle.dump(averaged, f)
-
-    return jsonify({
-        "message": "✅ Aggregation complete",
-        "num_clients": len(all_weights),
-        "global_file": global_path
-    })
-
-
+# ----------------------------
+# Main
+# ----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)

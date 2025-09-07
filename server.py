@@ -1,36 +1,35 @@
 from flask import Flask, request, jsonify
-import os, numpy as np
+import pickle
+import numpy as np
 
 app = Flask(__name__)
 
-# in-memory buffer for this demo
-client_updates = []
-EXPECTED_CLIENTS = int(os.getenv("EXPECTED_CLIENTS", "3"))  # change later if needed
+# Store weights from clients
+client_weights = []
 
-@app.get("/")
+@app.route("/", methods=["GET"])
 def home():
-    return "✅ federated server up"
+    return "Federated server up ✅"
 
-@app.post("/upload")
-def upload():
-    """
-    clients POST json like:
-    {"client_id":"1","weights":[0.1,0.2,0.3]}
-    (we’ll switch to real keras weight lists next)
-    """
-    data = request.get_json(force=True, silent=False)
-    client_id = data["client_id"]
-    weights  = np.array(data["weights"], dtype=float)
-    client_updates.append(weights)
-    print(f"received from client {client_id}: shape={weights.shape}")
+@app.route("/upload_weights", methods=["POST"])
+def upload_weights():
+    try:
+        file = request.files["file"]
+        weights = pickle.load(file)
+        client_weights.append(weights)
+        return jsonify({"message": "✅ Weights received", "total_clients": len(client_weights)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
-    if len(client_updates) >= EXPECTED_CLIENTS:
-        agg = np.mean(np.stack(client_updates, axis=0), axis=0)
-        client_updates.clear()
-        return jsonify({"status":"aggregated","global_weights": agg.tolist()})
-    else:
-        return jsonify({"status":"waiting","received":len(client_updates),"need":EXPECTED_CLIENTS})
+@app.route("/aggregate", methods=["GET"])
+def aggregate():
+    if not client_weights:
+        return jsonify({"error": "No weights received yet"})
+    
+    # Simple averaging aggregation
+    agg = [np.mean([w[i] for w in client_weights], axis=0) for i in range(len(client_weights[0]))]
+    
+    return jsonify({"message": "✅ Aggregation complete", "layers": len(agg)})
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)

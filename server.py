@@ -1,50 +1,64 @@
 from flask import Flask, request, jsonify, send_file
 import os
-from datetime import datetime
+import glob
 
 app = Flask(__name__)
 
-# Directory to store uploaded models
-MODEL_DIR = "server_models"
-os.makedirs(MODEL_DIR, exist_ok=True)
+# Folder to save uploaded models
+UPLOAD_FOLDER = "server_models"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-LATEST_MODEL_PATH = os.path.join(MODEL_DIR, "latest_model.h5")
+# Path to store aggregated global model
+GLOBAL_MODEL_PATH = os.path.join(UPLOAD_FOLDER, "global_model_weights.h5")
 
-# -------------------------------
-# 1️⃣ Upload trained model (from client)
-# -------------------------------
 @app.route("/upload_model", methods=["POST"])
 def upload_model():
-    if "model_file" not in request.files:
-        return jsonify({"error": "No model file provided"}), 400
+    """
+    Endpoint for clients to upload their trained models.
+    """
+    if 'model_file' not in request.files or 'client_id' not in request.form:
+        return jsonify({"error": "Missing file or client_id"}), 400
 
-    model_file = request.files["model_file"]
-    client_id = request.form.get("client_id", "unknown_client")
+    model_file = request.files['model_file']
+    client_id = request.form['client_id']
 
-    # Save with timestamp to avoid overwrites
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = os.path.join(MODEL_DIR, f"{client_id}_{timestamp}.h5")
+    # Save the uploaded model
+    save_path = os.path.join(UPLOAD_FOLDER, f"{client_id}_global_model_weights.h5")
     model_file.save(save_path)
 
-    # Also update latest model reference
-    model_file.save(LATEST_MODEL_PATH)
+    return jsonify({"message": f"✅ Model from {client_id} saved successfully!", "path": save_path})
 
-    return jsonify({
-        "message": f"✅ Model from {client_id} uploaded successfully!",
-        "saved_as": save_path
-    }), 200
 
-# -------------------------------
-# 2️⃣ Download latest model (for chatbot interface)
-# -------------------------------
-@app.route("/download_model", methods=["GET"])
-def download_model():
-    if not os.path.exists(LATEST_MODEL_PATH):
-        return jsonify({"error": "No model available yet"}), 404
-    return send_file(LATEST_MODEL_PATH, as_attachment=True)
+@app.route("/download_global", methods=["GET"])
+def download_global():
+    """
+    Endpoint for clients to download the latest global model.
+    """
+    if not os.path.exists(GLOBAL_MODEL_PATH):
+        return jsonify({"error": "Global model not available yet."}), 404
 
-# -------------------------------
-# Run Flask server
-# -------------------------------
+    return send_file(GLOBAL_MODEL_PATH, as_attachment=True)
+
+
+@app.route("/aggregate", methods=["POST"])
+def aggregate_models():
+    """
+    Optional: Aggregate client models into a single global model.
+    Here we just pick the latest uploaded model as global for simplicity.
+    """
+    # Find all client models
+    client_models = glob.glob(os.path.join(UPLOAD_FOLDER, "*_global_model_weights.h5"))
+    if not client_models:
+        return jsonify({"error": "No client models available for aggregation."}), 404
+
+    # Example: overwrite global with the latest model (can implement averaging later)
+    latest_model = max(client_models, key=os.path.getctime)
+    os.replace(latest_model, GLOBAL_MODEL_PATH)
+
+    return jsonify({"message": f"✅ Global model updated from {latest_model}"})
+
+
 if __name__ == "__main__":
+    # Make sure server_models folder exists
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     app.run(host="0.0.0.0", port=5001)

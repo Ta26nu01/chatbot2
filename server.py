@@ -1,111 +1,120 @@
 from flask import Flask, request, jsonify, send_file
 import os
+import pickle
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import load_model
 
 app = Flask(__name__)
 
-# --------------------------
-# Config
-# --------------------------
-BASE_URL = "https://chatbot2-ktaa.onrender.com"
-UPLOAD_FOLDER = "uploaded_models"
+# ----------------------------
+# Configuration
+# ----------------------------
+UPLOAD_FOLDER = "uploaded_weights"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-GLOBAL_MODEL_PATH = os.path.join(UPLOAD_FOLDER, "global_model_weights.h5")
-NUM_CLIENTS = 3  # Adjust based on your project
-client_models = {}  # store client file paths in memory
-ROUND_COUNTER = 0
+GLOBAL_WEIGHTS_FILE = os.path.join(UPLOAD_FOLDER, "global_weights.pkl")
 
-# --------------------------
-# Upload model endpoint
-# --------------------------
-@app.route("/upload_model", methods=["POST"])
-def upload_model():
-    global client_models
+# Store client weights temporarily
+client_weights = {}
+expected_clients = 3   # 🔹 Change this to number of clients in your setup
+uploaded_count = 0
 
-    client_id = request.form.get("client_id")
-    file = request.files.get("file")
 
-    if not client_id or not file:
-        return jsonify({"error": "Missing file or client_id"}), 400
-
-    save_path = os.path.join(UPLOAD_FOLDER, f"{client_id}_model.h5")
-    file.save(save_path)
-    client_models[client_id] = save_path
-
-    print(f"✅ Model received from {client_id} and saved at {save_path}")
-
-    # Check if all clients uploaded
-    if len(client_models) == NUM_CLIENTS:
-        return jsonify({"message": f"All {NUM_CLIENTS} clients uploaded. Ready to aggregate!"})
-
-    return jsonify({"message": f"Model from {client_id} uploaded. Waiting for more clients..."})
-
-# --------------------------
-# Aggregate models (FedAvg)
-# --------------------------
-@app.route("/aggregate", methods=["GET"])
-def aggregate_models():
-    global ROUND_COUNTER
-
-    if len(client_models) < NUM_CLIENTS:
-        return jsonify({"error": f"Waiting for {NUM_CLIENTS - len(client_models)} more clients."}), 400
-
-    models = []
-    for client_id, path in client_models.items():
-        try:
-            model = load_model(path)
-            models.append(model.get_weights())
-            print(f"📥 Loaded weights from {client_id}")
-        except Exception as e:
-            print(f"❌ Error loading {path}: {e}")
-
-    # FedAvg aggregation
-    avg_weights = []
-    for weights_tuple in zip(*models):
-        avg_weights.append(np.mean(weights_tuple, axis=0))
-
-    # Rebuild global model architecture (must match clients)
-    global_model = tf.keras.Sequential([
-        tf.keras.layers.Embedding(100, 16, input_length=9),
-        tf.keras.layers.GlobalAveragePooling1D(),
-        tf.keras.layers.Dense(5, activation="softmax")
-    ])
-    global_model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
-    global_model.set_weights(avg_weights)
-    global_model.save(GLOBAL_MODEL_PATH)
-
-    ROUND_COUNTER += 1
-    client_models.clear()  # reset for next round
-    print(f"🌍 Global model aggregated and saved at {GLOBAL_MODEL_PATH} (Round {ROUND_COUNTER})")
-
-    return jsonify({"message": f"Global model aggregated successfully (Round {ROUND_COUNTER})"})
-
-# --------------------------
-# Download global model
-# --------------------------
-@app.route("/download_global", methods=["GET"])
-def download_global():
-    if not os.path.exists(GLOBAL_MODEL_PATH):
-        return jsonify({"error": "Global model not available yet."}), 404
-    return send_file(GLOBAL_MODEL_PATH, as_attachment=True)
-
-# --------------------------
-# Server info
-# --------------------------
+# ----------------------------
+# Homepage route
+# ----------------------------
 @app.route("/", methods=["GET"])
 def home():
+    return "🚀 Federated Learning Server is running! Use /upload_weights to upload, /aggregate to aggregate, and /download_global to fetch the global model."
+
+
+# ----------------------------
+# Upload weights from client
+# ----------------------------
+@app.route("/upload_weights", methods=["POST"])
+def upload_weights():
+    global uploaded_count
+
+    if "file" not in request.files or "client_id" not in request.form:
+        return jsonify({"error": "Missing file or client_id"}), 400
+
+    file = request.files["file"]
+    client_id = request.form["client_id"]
+
+    if file.filename == "":
+        return jsonify({"error": "Empty filename"}), 400
+
+    # Save client weights
+    filepath = os.path.join(UPLOAD_FOLDER, file.filename)
+    file.save(filepath)
+
+    with open(filepath, "rb") as f:
+        weights = pickle.load(f)
+        client_weights[client_id] = weights
+
+    uploaded_count += 1
+    print(f"📥 Received weights from {client_id} ({uploaded_count}/{expected_clients})")
+
+    # If all clients have uploaded, aggregate automatically
+    if uploaded_count >= expected_clients:
+        aggregate_and_save()
+        return jsonify({
+            "message": "✅ All clients uploaded. Aggregation complete!",
+            "global_file": GLOBAL_WEIGHTS_FILE
+        })
+
+    return jsonify({"message": f"✅ Weights from {client_id} received. Waiting for more clients..."})
+
+
+# ----------------------------
+# Manual aggregation trigger
+# ----------------------------
+@app.route("/aggregate", methods=["GET"])
+def aggregate_manual():
+    if len(client_weights) < expected_clients:
+        return jsonify({
+            "message": f"⏳ Waiting for more clients. Received {len(client_weights)} of {expected_clients}."
+        }), 400
+
+    aggregate_and_save()
     return jsonify({
-        "message": "Federated Learning Server is running 🚀",
-        "upload_endpoint": f"{BASE_URL}/upload_model",
-        "aggregate_endpoint": f"{BASE_URL}/aggregate",
-        "download_endpoint": f"{BASE_URL}/download_global"
+        "message": "✅ Manual aggregation complete!",
+        "global_file": GLOBAL_WEIGHTS_FILE
     })
 
-# --------------------------
-# Run server
-# --------------------------
+
+# ----------------------------
+# Download global weights
+# ----------------------------
+@app.route("/download_global", methods=["GET"])
+def download_global():
+    if not os.path.exists(GLOBAL_WEIGHTS_FILE):
+        return jsonify({"error": "No global weights available yet"}), 404
+    return send_file(GLOBAL_WEIGHTS_FILE, as_attachment=True)
+
+
+# ----------------------------
+# Helper: Aggregate and Save
+# ----------------------------
+def aggregate_and_save():
+    global client_weights, uploaded_count
+
+    print("⚡ Aggregating weights from clients...")
+    aggregated_weights = []
+    for layers in zip(*client_weights.values()):
+        aggregated_weights.append(np.mean(layers, axis=0))
+
+    with open(GLOBAL_WEIGHTS_FILE, "wb") as f:
+        pickle.dump(aggregated_weights, f)
+
+    print(f"✅ Aggregated global weights saved at {GLOBAL_WEIGHTS_FILE}")
+
+    # Reset for next round
+    client_weights = {}
+    uploaded_count = 0
+
+
+# ----------------------------
+# Run the server
+# ----------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=5001, debug=True)

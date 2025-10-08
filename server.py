@@ -1,120 +1,59 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, send_file, jsonify
 import os
-import pickle
-import numpy as np
 
 app = Flask(__name__)
 
-# ----------------------------
-# Configuration
-# ----------------------------
-UPLOAD_FOLDER = "uploaded_weights"
+# ---------------- CONFIG ---------------- #
+UPLOAD_FOLDER = "client_uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-GLOBAL_WEIGHTS_FILE = os.path.join(UPLOAD_FOLDER, "global_weights.pkl")
+# ---------------- UPLOAD ROUTE ---------------- #
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    """
+    Upload route for clients to send their weights and tokenizer.
+    Expects:
+        - 'weights' : weights.h5
+        - 'tokenizer': tokenizer.pkl
+        - 'client_id': unique identifier for the client
+    """
+    client_id = request.form.get('client_id', 'unknown')
+    
+    # Handle weights file
+    weights_file = request.files.get('weights')
+    if weights_file:
+        weights_filename = f"{client_id}_weights.h5"
+        weights_file.save(os.path.join(UPLOAD_FOLDER, weights_filename))
+    else:
+        return jsonify({"status": "error", "message": "Weights file missing"}), 400
 
-# Store client weights temporarily
-client_weights = {}
-expected_clients = 3   # 🔹 Change this to number of clients in your setup
-uploaded_count = 0
+    # Handle tokenizer file
+    tokenizer_file = request.files.get('tokenizer')
+    if tokenizer_file:
+        tokenizer_filename = f"{client_id}_tokenizer.pkl"
+        tokenizer_file.save(os.path.join(UPLOAD_FOLDER, tokenizer_filename))
+    else:
+        return jsonify({"status": "error", "message": "Tokenizer file missing"}), 400
 
-
-# ----------------------------
-# Homepage route
-# ----------------------------
-@app.route("/", methods=["GET"])
-def home():
-    return "🚀 Federated Learning Server is running! Use /upload_weights to upload, /aggregate to aggregate, and /download_global to fetch the global model."
-
-
-# ----------------------------
-# Upload weights from client
-# ----------------------------
-@app.route("/upload_weights", methods=["POST"])
-def upload_weights():
-    global uploaded_count
-
-    if "file" not in request.files or "client_id" not in request.form:
-        return jsonify({"error": "Missing file or client_id"}), 400
-
-    file = request.files["file"]
-    client_id = request.form["client_id"]
-
-    if file.filename == "":
-        return jsonify({"error": "Empty filename"}), 400
-
-    # Save client weights
-    filepath = os.path.join(UPLOAD_FOLDER, file.filename)
-    file.save(filepath)
-
-    with open(filepath, "rb") as f:
-        weights = pickle.load(f)
-        client_weights[client_id] = weights
-
-    uploaded_count += 1
-    print(f"📥 Received weights from {client_id} ({uploaded_count}/{expected_clients})")
-
-    # If all clients have uploaded, aggregate automatically
-    if uploaded_count >= expected_clients:
-        aggregate_and_save()
-        return jsonify({
-            "message": "✅ All clients uploaded. Aggregation complete!",
-            "global_file": GLOBAL_WEIGHTS_FILE
-        })
-
-    return jsonify({"message": f"✅ Weights from {client_id} received. Waiting for more clients..."})
-
-
-# ----------------------------
-# Manual aggregation trigger
-# ----------------------------
-@app.route("/aggregate", methods=["GET"])
-def aggregate_manual():
-    if len(client_weights) < expected_clients:
-        return jsonify({
-            "message": f"⏳ Waiting for more clients. Received {len(client_weights)} of {expected_clients}."
-        }), 400
-
-    aggregate_and_save()
     return jsonify({
-        "message": "✅ Manual aggregation complete!",
-        "global_file": GLOBAL_WEIGHTS_FILE
+        "status": "success",
+        "uploaded_files": [weights_filename, tokenizer_filename]
     })
 
+# ---------------- DOWNLOAD ROUTE ---------------- #
+@app.route('/download/<filename>', methods=['GET'])
+def download_file(filename):
+    """
+    Download a file by name from the uploads folder.
+    """
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    if os.path.exists(filepath):
+        return send_file(filepath, as_attachment=True)
+    else:
+        return jsonify({"status": "error", "message": "File not found"}), 404
 
-# ----------------------------
-# Download global weights
-# ----------------------------
-@app.route("/download_global", methods=["GET"])
-def download_global():
-    if not os.path.exists(GLOBAL_WEIGHTS_FILE):
-        return jsonify({"error": "No global weights available yet"}), 404
-    return send_file(GLOBAL_WEIGHTS_FILE, as_attachment=True)
-
-
-# ----------------------------
-# Helper: Aggregate and Save
-# ----------------------------
-def aggregate_and_save():
-    global client_weights, uploaded_count
-
-    print("⚡ Aggregating weights from clients...")
-    aggregated_weights = []
-    for layers in zip(*client_weights.values()):
-        aggregated_weights.append(np.mean(layers, axis=0))
-
-    with open(GLOBAL_WEIGHTS_FILE, "wb") as f:
-        pickle.dump(aggregated_weights, f)
-
-    print(f"✅ Aggregated global weights saved at {GLOBAL_WEIGHTS_FILE}")
-
-    # Reset for next round
-    client_weights = {}
-    uploaded_count = 0
-
-
-# ----------------------------
-# Run the server
-# ----------------------------
+# ---------------- RUN SERVER ---------------- #
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    # On Render, use host='0.0.0.0' and default port (from env)
+    port = int(os.environ.get("PORT", 5001))
+    app.run(host='0.0.0.0', port=port)
